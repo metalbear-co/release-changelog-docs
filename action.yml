@@ -1,0 +1,280 @@
+name: Release changelog docs
+description: Render a complete public changelog and safely update its website page
+inputs:
+  local_file_path:
+    description: Source changelog relative to the selected source checkout
+    required: true
+  destination_repo:
+    description: Destination repository (metalbear-co/docs-changelog)
+    required: true
+  destination_file_path:
+    description: One of the four component pages under changelog/
+    required: true
+  git_user:
+    description: Commit author name
+    required: true
+  git_email:
+    description: Commit author email
+    required: true
+  git_access_token:
+    description: Token with contents-write access to the destination
+    required: true
+  title:
+    description: Fixed component page title
+    required: true
+  description:
+    description: Fixed component page description
+    required: true
+  tags:
+    description: Fixed comma-separated page tags
+    required: true
+  date:
+    description: Fixed initial page date (YYYY-MM-DD)
+    required: true
+  ref:
+    description: Source ref; empty selects the latest published non-prerelease release tag
+    required: false
+    default: ''
+  source_token:
+    description: Token with contents-read access to the caller repository
+    required: true
+outputs:
+  source_sha:
+    description: Full commit SHA captured from the selected source checkout
+    value: ${{ steps.source.outputs.sha }}
+runs:
+  using: composite
+  steps:
+    - name: Validate isolated checkout paths
+      id: validate
+      shell: bash
+      env:
+        DESTINATION_REPO: ${{ inputs.destination_repo }}
+        DESTINATION_FILE: ${{ inputs.destination_file_path }}
+        SOURCE_FILE: ${{ inputs.local_file_path }}
+        ACTION_DIRECTORY: ${{ github.action_path }}
+      run: |
+        set -euo pipefail
+        [[ "$DESTINATION_REPO" == metalbear-co/docs-changelog ]] || { echo 'Unsupported destination repository' >&2; exit 1; }
+        DESTINATION_FILE="${DESTINATION_FILE#./}"
+        case "$DESTINATION_FILE" in
+          changelog/README.md|changelog/mirrord.md|changelog/mirrord-vscode.md|changelog/mirrord-intellij.md) ;;
+          *) echo 'Unsupported component page' >&2; exit 1 ;;
+        esac
+        workspace="$(realpath -e -- "$GITHUB_WORKSPACE")"
+        action="$(realpath -e -- "$ACTION_DIRECTORY")"
+        source_directory=release-changelog-docs-source
+        destination_directory=release-changelog-docs-destination
+        # Checkout cleaning and publication resets must never touch caller or action files.
+        for directory in "$source_directory" "$destination_directory"; do
+          checkout="$workspace/$directory"
+          [[ ! -e "$checkout" && ! -L "$checkout" ]] || { echo 'Checkout directory already exists' >&2; exit 1; }
+          [[ "$action" != "$checkout" && "$action" != "$checkout/"* && "$checkout" != "$action/"* ]] || { echo 'Checkout overlaps action directory' >&2; exit 1; }
+        done
+        [[ -n "$SOURCE_FILE" && "$SOURCE_FILE" != /* && "$SOURCE_FILE" != *$'\n'* && "$SOURCE_FILE" != *$'\r'* ]] || { echo 'Source file must be a relative single-line path' >&2; exit 1; }
+        # Git sparse patterns do not accept ./; resolve once before checkout so
+        # selection, source validation and rendering refer to the same file.
+        source="$(realpath -m -- "$workspace/$source_directory/$SOURCE_FILE")"
+        [[ "$source" == "$workspace/$source_directory/"* ]] || { echo 'Source file must be inside the source checkout' >&2; exit 1; }
+        source_file="${source#"$workspace/$source_directory/"}"
+        printf 'source_directory=%s\ndirectory=%s\npage=%s\nsource_file=%s\n' "$source_directory" "$destination_directory" "$DESTINATION_FILE" "$source_file" >> "$GITHUB_OUTPUT"
+    - name: Select changelog source ref
+      id: resolve
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.source_token }}
+        REQUESTED_REF: ${{ inputs.ref }}
+      run: |
+        set -euo pipefail
+
+        ref="$REQUESTED_REF"
+        if [[ -z "$ref" ]]; then
+          tag=$(gh api "repos/${GITHUB_REPOSITORY}/releases/latest" --jq .tag_name)
+          if [[ -z "$tag" || "$tag" == "null" ]]; then
+            echo "Latest published release has no tag, aborting." >&2
+            exit 1
+          fi
+          ref="refs/tags/$tag"
+        fi
+
+        if ! git check-ref-format --allow-onelevel "$ref"; then
+          echo "Invalid changelog source ref, aborting." >&2
+          exit 1
+        fi
+        printf 'Selected changelog source ref: %s\n' "$ref"
+        printf 'ref=%s\n' "$ref" >> "$GITHUB_OUTPUT"
+
+    - name: Checkout changelog source
+      uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      with:
+        repository: ${{ github.repository }}
+        ref: ${{ steps.resolve.outputs.ref }}
+        token: ${{ inputs.source_token }}
+        path: ${{ steps.validate.outputs.source_directory }}
+        persist-credentials: false
+        sparse-checkout: /${{ steps.validate.outputs.source_file }}
+        sparse-checkout-cone-mode: false
+    - name: Verify changelog source commit
+      id: source
+      shell: bash
+      working-directory: ${{ steps.validate.outputs.source_directory }}
+      env:
+        SELECTED_REF: ${{ steps.resolve.outputs.ref }}
+        SOURCE_FILE: ${{ steps.validate.outputs.source_file }}
+      run: |
+        set -euo pipefail
+
+        sha=$(git rev-parse HEAD)
+        if [[ ! "$sha" =~ ^[0-9a-f]{40}$ ]]; then
+          echo "Source checkout did not resolve to a full commit SHA, aborting." >&2
+          exit 1
+        fi
+        if [[ "$SELECTED_REF" =~ ^[0-9a-fA-F]{40}$ && "$sha" != "${SELECTED_REF,,}" ]]; then
+          echo "Source checkout does not match the requested commit, aborting." >&2
+          exit 1
+        fi
+        if [[ ! -s "$SOURCE_FILE" ]]; then
+          echo "Source changelog is missing or empty, aborting." >&2
+          exit 1
+        fi
+        source="$(realpath -e -- "$SOURCE_FILE")"
+        [[ -f "$source" && "$source" == "$(pwd -P)/"* ]] || { echo 'Source file must be inside the source checkout' >&2; exit 1; }
+        printf 'Resolved changelog source commit: %s\n' "$sha"
+        printf 'sha=%s\n' "$sha" >> "$GITHUB_OUTPUT"
+
+    - name: Set up Rust toolchain
+      uses: metalbear-co/setup-rust-toolchain@009cda47e1b529982a00627a40eda87b4215035a
+    - name: Install rust-script
+      shell: bash
+      run: cargo install rust-script --locked
+    - name: Render candidate before changing destination
+      id: render
+      shell: bash
+      working-directory: ${{ steps.validate.outputs.source_directory }}
+      env:
+        CHANGELOG_TITLE: ${{ inputs.title }}
+        CHANGELOG_DESCRIPTION: ${{ inputs.description }}
+        CHANGELOG_TAGS: ${{ inputs.tags }}
+        CHANGELOG_DATE: ${{ inputs.date }}
+        SOURCE_SHA: ${{ steps.source.outputs.sha }}
+        SOURCE_FILE: ${{ steps.validate.outputs.source_file }}
+        ACTION_DIRECTORY: ${{ github.action_path }}
+      run: |
+        set -euo pipefail
+        [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ && "$(git rev-parse HEAD)" == "$SOURCE_SHA" ]] || { echo 'Source checkout does not match source_sha' >&2; exit 1; }
+        candidate="$(mktemp "$RUNNER_TEMP/changelog.XXXXXXXX.md")"
+        rust-script "$ACTION_DIRECTORY/src/main.rs" < "$SOURCE_FILE" > "$candidate"
+        [[ -s "$candidate" ]] || { echo 'Renderer produced an empty page' >&2; exit 1; }
+        printf 'candidate=%s\n' "$candidate" >> "$GITHUB_OUTPUT"
+    - name: Checkout destination main
+      uses: actions/checkout@v4
+      with:
+        repository: ${{ inputs.destination_repo }}
+        ref: main
+        fetch-depth: 0
+        path: ${{ steps.validate.outputs.directory }}
+        token: ${{ inputs.git_access_token }}
+    - name: Publish selected page with optimistic retries
+      id: publish
+      shell: bash
+      working-directory: ${{ steps.validate.outputs.directory }}
+      env:
+        SOURCE_SHA: ${{ steps.source.outputs.sha }}
+        CANDIDATE_FILE: ${{ steps.render.outputs.candidate }}
+        DESTINATION_FILE: ${{ steps.validate.outputs.page }}
+        DESTINATION_DIRECTORY: ${{ steps.validate.outputs.directory }}
+        GIT_USER: ${{ inputs.git_user }}
+        GIT_EMAIL: ${{ inputs.git_email }}
+      run: |
+        set -euo pipefail
+        case "$DESTINATION_FILE" in
+          changelog/README.md) component=Operator ;;
+          changelog/mirrord.md) component=mirrord ;;
+          changelog/mirrord-vscode.md) component='VS Code' ;;
+          changelog/mirrord-intellij.md) component=IntelliJ ;;
+          *) echo 'Unsupported component page' >&2; exit 1 ;;
+        esac
+        [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo 'Invalid source SHA' >&2; exit 1; }
+        [[ "$DESTINATION_DIRECTORY" =~ ^[A-Za-z0-9][A-Za-z0-9_-]*$ ]] || { echo 'Invalid checkout directory' >&2; exit 1; }
+        [[ "$(pwd -P)" == "$(realpath -- "$GITHUB_WORKSPACE")/$DESTINATION_DIRECTORY" ]] || { echo 'Publisher is outside its isolated checkout' >&2; exit 1; }
+        [[ -z "$(git status --porcelain)" ]] || { echo 'Destination checkout must be clean' >&2; exit 1; }
+        [[ -s "$CANDIDATE_FILE" && ! -L "$CANDIDATE_FILE" ]] || { echo 'Missing candidate' >&2; exit 1; }
+        git config --local user.name "$GIT_USER"
+        git config --local user.email "$GIT_EMAIL"
+
+        # All four release streams use numeric triples; historical later headings
+        # need not follow this format. Bound each integer before Bash arithmetic.
+        version() {
+          local heading
+          heading="$(awk '/^## / { print; exit }' "$1")"
+          if [[ "$heading" =~ ^##\ v?([0-9]{1,9})\.([0-9]{1,9})\.([0-9]{1,9})($|[[:space:]]) ]]; then
+            printf '%s %s %s\n' "$((10#${BASH_REMATCH[1]}))" "$((10#${BASH_REMATCH[2]}))" "$((10#${BASH_REMATCH[3]}))"
+          else
+            echo "Unsupported first release heading in $1" >&2
+            return 1
+          fi
+        }
+        compare_versions() {
+          local -a left right
+          local index
+          read -r -a left <<< "$1"
+          read -r -a right <<< "$2"
+          for index in 0 1 2; do
+            if (( left[index] > right[index] )); then echo 1; return; fi
+            if (( left[index] < right[index] )); then echo -1; return; fi
+          done
+          echo 0
+        }
+        without_lastmod() {
+          awk 'NR == 1 && $0 == "---" { front=1; print; next }
+               front && $0 == "---" { front=0; print; next }
+               front && /^lastmod: / { next }
+               { print }' "$1"
+        }
+        candidate_version="$(version "$CANDIDATE_FILE")"
+        initial_blob="$(git rev-parse --verify "HEAD:$DESTINATION_FILE" 2>/dev/null || true)"
+        for attempt in 1 2 3; do
+          [[ ! -L changelog && ! -L "$DESTINATION_FILE" ]] || { echo 'Destination page cannot be a symlink' >&2; exit 1; }
+          current_blob="$(git rev-parse --verify "HEAD:$DESTINATION_FILE" 2>/dev/null || true)"
+          if [[ -e "$DESTINATION_FILE" ]]; then
+            [[ -f "$DESTINATION_FILE" ]] || { echo 'Destination must be a regular file' >&2; exit 1; }
+            current_version="$(version "$DESTINATION_FILE")"
+            order="$(compare_versions "$candidate_version" "$current_version")"
+            if [[ "$order" == -1 ]]; then
+              echo 'Skipping stale changelog: destination has a newer release'
+              exit 0
+            fi
+            if cmp -s <(without_lastmod "$CANDIDATE_FILE") <(without_lastmod "$DESTINATION_FILE"); then
+              echo 'Changelog unchanged; retaining existing lastmod'
+              exit 0
+            fi
+            if [[ "$order" == 0 ]]; then
+              if [[ "$current_blob" != "$initial_blob" ]]; then
+                echo 'Concurrent same-version page change; refusing overwrite' >&2
+                exit 1
+              fi
+              provenance="$(git log -1 --format='%(trailers:key=Changelog-Source-SHA,valueonly)' -- "$DESTINATION_FILE")"
+              [[ "$provenance" == "$SOURCE_SHA" ]] || { echo 'Same-version change has missing or different source provenance' >&2; exit 1; }
+            fi
+          elif [[ -n "$initial_blob" && "$current_blob" != "$initial_blob" ]]; then
+            echo 'Destination page was removed concurrently' >&2
+            exit 1
+          fi
+          base="$(git rev-parse HEAD)"
+          mkdir -p -- changelog
+          cp -- "$CANDIDATE_FILE" "$DESTINATION_FILE"
+          git add -- "$DESTINATION_FILE"
+          git commit -m "Update $component changelog" -m "Changelog-Source-SHA: $SOURCE_SHA"
+          echo "Changelog push attempt $attempt/3"
+          if git push origin HEAD:refs/heads/main; then exit 0; fi
+          git fetch origin refs/heads/main:refs/remotes/origin/main
+          latest="$(git rev-parse refs/remotes/origin/main)"
+          [[ "$latest" != "$base" ]] || { echo 'Push failed without remote advancement; check credentials/protection/network' >&2; exit 1; }
+          if [[ "$attempt" == 3 ]]; then
+            echo 'Changelog publication exhausted three push attempts' >&2
+            exit 1
+          fi
+          # This checkout was created exclusively for publication; source and
+          # action files live outside it and survive a rejected push.
+          git reset --hard "$latest"
+        done
