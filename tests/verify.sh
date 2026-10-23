@@ -65,6 +65,11 @@ sources=$(realpath --canonicalize-existing -- "$sources")
 jq --null-input --arg bash "$BASH_VERSION" --arg jq "$jq_version" --arg yq "$(yq --version)" \
     '{bash:$bash,jq:$jq,yq:$yq}' > "$root/tool-versions.json"
 yq --output-format=json '.' "$action_directory/action.yml" > "$root/action.json"
+jq --exit-status '
+    .inputs.date.required == false and .inputs.date.default == "2026-10-21" and
+    ([.runs.steps[] | select(.id == "render") | .env.CHANGELOG_DATE] == ["${{ inputs.date }}"])
+' "$root/action.json" >/dev/null
+default_date=$(jq --exit-status --raw-output '.inputs.date.default' "$root/action.json")
 for name in validate resolve source render publish; do
     jq --exit-status --raw-output --arg id "$name" \
         '[.runs.steps[] | select(.id == $id)] | if length == 1 then .[0].run else error("Missing or duplicate action block") end | select(type == "string" and length > 0)' \
@@ -141,7 +146,7 @@ output_value() {
 # Full histories stay private. Compare bytes and independently retained ordered
 # release boundaries rather than constructing expectations with production code.
 for component in operator mirrord mirrord-vscode mirrord-intellij; do
-    relative=CHANGELOG.md tags=oss,team,enterprise date=2026-10-21
+    relative=CHANGELOG.md tags=oss,team,enterprise date=$default_date
     case "$component" in
         operator) relative=public/CHANGELOG.md; title='Operator Changelog'; tags=team,enterprise; date=2023-08-15 ;;
         mirrord) title='mirrord Changelog' ;;
@@ -286,8 +291,16 @@ output="$root/render-output"
 render_env=("SOURCE_SHA=$source_sha" "SOURCE_FILE=$source/seed/CHANGELOG.md"
     "ACTION_DIRECTORY=$action_directory" "RUNNER_TEMP=$root" "GITHUB_OUTPUT=$output"
     'CHANGELOG_TITLE=Fixture Changelog' 'CHANGELOG_DESCRIPTION=Public releases.'
-    CHANGELOG_TAGS=oss,team CHANGELOG_DATE=2026-10-21)
+    CHANGELOG_TAGS=oss,team "CHANGELOG_DATE=$default_date")
 execute "$root/render.bash" "$source/seed" "$root/render-step.json" "${render_env[@]}"; expect_exit 0
+page=$(output_value "$output" candidate)
+yq --front-matter=extract --output-format=json '.' "$page" > "$root/default-date.metadata.json"
+jq --exit-status '.date == "2026-10-21T00:00:00.000Z"' "$root/default-date.metadata.json" >/dev/null
+execute "$root/render.bash" "$source/seed" "$root/override-date.json" "${render_env[@]}" \
+    CHANGELOG_DATE=2023-08-15 "GITHUB_OUTPUT=$root/override-date.output"; expect_exit 0
+page=$(output_value "$root/override-date.output" candidate)
+yq --front-matter=extract --output-format=json '.' "$page" > "$root/override-date.metadata.json"
+jq --exit-status '.date == "2023-08-15T00:00:00.000Z"' "$root/override-date.metadata.json" >/dev/null
 execute "$root/render.bash" "$source/seed" "$root/bad-sha.json" "${render_env[@]}" "SOURCE_SHA=$sha"; expect_exit 1
 index=0
 for value in 'bad date' '2026-02-30'; do
@@ -435,7 +448,8 @@ else
             $action.with.git_access_token == ("${{ secrets." + $secret + " }}") and
             $action.with.destination_repo == "metalbear-co/docs-changelog" and
             ($action.with.local_file_path | sub("^\\./"; "")) == $source and
-            ($action.with.destination_file_path | sub("^\\./"; "")) == $page and $action.with.date == $date
+            ($action.with.destination_file_path | sub("^\\./"; "")) == $page and
+            (if $page == "changelog/README.md" then $action.with.date == $date else ($action.with | has("date") | not) end)
         ' "$update" >/dev/null
         jq --exit-status '
             (.runs.steps | map(select(.id == "validate"))[0]) as $validate |
@@ -524,7 +538,8 @@ EOF
         title=$(jq --raw-output '.jobs["build-and-publish"].steps[0].with.title' "$update")
         description=$(jq --raw-output '.jobs["build-and-publish"].steps[0].with.description' "$update")
         tags=$(jq --raw-output '.jobs["build-and-publish"].steps[0].with.tags' "$update")
-        date=$(jq --raw-output '.jobs["build-and-publish"].steps[0].with.date' "$update")
+        date=$(jq --exit-status --raw-output --arg default "$default_date" \
+            '.jobs["build-and-publish"].steps[0].with | if has("date") then .date else $default end' "$update")
         execute "$root/render.bash" "$sparse" "$root/sparse-render-$component.json" \
             "SOURCE_SHA=$expected_sha" "SOURCE_FILE=$source_file" "ACTION_DIRECTORY=$action_directory" \
             "RUNNER_TEMP=$root" "GITHUB_OUTPUT=$rendered_output" "CHANGELOG_TITLE=$title" \
@@ -532,6 +547,9 @@ EOF
         expect_exit 0
         page=$(output_value "$rendered_output" candidate)
         contains "$page" 'Release tree.'
+        yq --front-matter=extract --output-format=json '.' "$page" > "$root/sparse-render-$component.metadata.json"
+        jq --exit-status --arg date "$expected_date" '.date == ($date + "T00:00:00.000Z")' \
+            "$root/sparse-render-$component.metadata.json" >/dev/null
         jq --exit-status --argjson headings "$(release_headings "$page")" '$headings == ["## 3.10.0"]' \
             --null-input >/dev/null
         if [[ "$component" == mirrord-vscode || "$component" == mirrord-intellij ]]; then

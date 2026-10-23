@@ -30,7 +30,8 @@ inputs:
     required: true
   date:
     description: Fixed initial page date (YYYY-MM-DD)
-    required: true
+    required: false
+    default: '2026-10-21'
   ref:
     description: Source ref; empty selects the latest published non-prerelease release tag
     required: false

@@ -15,7 +15,8 @@ releases/refs fail rather than fall back to `main`.
 
 ## Inputs
 
-All inputs except `ref` are required. Metadata values are fixed in each source workflow.
+All inputs except `date` and `ref` are required. Component metadata stays fixed;
+source workflows supply it, while the action provides the default page date.
 
 | Input | Contract |
 | --- | --- |
@@ -26,7 +27,7 @@ All inputs except `ref` are required. Metadata values are fixed in each source w
 | `git_access_token` | Destination contents-write token, separate from `source_token`. |
 | `title`, `description` | Nonblank, single-line component metadata. |
 | `tags` | Comma-separated nonblank tags. |
-| `date` | Fixed initial page date, exactly `YYYY-MM-DD`. |
+| `date` | Optional fixed initial page date, exactly `YYYY-MM-DD`; defaults to `2026-10-21`. |
 | `ref` | Optional commit, tag or branch; empty selects the latest published release tag, with no main fallback. |
 | `source_token` | Source contents-read token, supplied as `${{ github.token }}` by wrappers. |
 
@@ -36,6 +37,12 @@ All inputs except `ref` are required. Metadata values are fixed in each source w
 | mirrord | `changelog/mirrord.md` | mirrord Changelog | The release changelog for the mirrord CLI. | `oss,team,enterprise` | `2026-10-21` |
 | VS Code | `changelog/mirrord-vscode.md` | VS Code Changelog | The release changelog for the mirrord VS Code extension. | `oss,team,enterprise` | `2026-10-21` |
 | IntelliJ | `changelog/mirrord-intellij.md` | IntelliJ Changelog | The release changelog for the mirrord IntelliJ plugin. | `oss,team,enterprise` | `2026-10-21` |
+
+The page `date` records when the component page was introduced, independently of
+the release dates in its history and the render-time `lastmod`. Its fixed default
+keeps that page metadata stable across releases without repeating it in each
+source workflow. Callers can override it to preserve a legacy page date:
+Operator supplies `2023-08-15`, while the other components omit the input.
 
 The `source_sha` output is the full lowercase SHA captured from the actual source checkout.
 An exact SHA ref must match that checkout. Missing refs, missing/empty source files,
@@ -149,7 +156,8 @@ transport to local files. No real remote is written.
 for all four source repositories. With it, the driver also exercises source
 resolver/SHA-capture blocks and checks release-job dependencies, guards, secrets
 and action pins. Without it, workflow integration is explicitly unverified.
-The driver covers full histories, component metadata, no-op dates, source SHA
-validation, checkout isolation, stale versions, provenance, competing component
-writes, same-page conflicts, exhausted retries and transport failure. Inspect
-the per-scenario JSON logs in its printed artifact directory on failure.
+The driver covers full histories, component metadata, the effective default page
+date and explicit legacy override through the action render block, no-op dates,
+source SHA validation, checkout isolation, stale versions, provenance, competing
+component writes, same-page conflicts, exhausted retries and transport failure.
+Inspect the per-scenario JSON logs in its printed artifact directory on failure.
