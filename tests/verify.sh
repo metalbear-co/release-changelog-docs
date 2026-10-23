@@ -67,7 +67,9 @@ jq --null-input --arg bash "$BASH_VERSION" --arg jq "$jq_version" --arg yq "$(yq
 yq --output-format=json '.' "$action_directory/action.yml" > "$root/action.json"
 jq --exit-status '
     .inputs.date.required == false and .inputs.date.default == "2026-10-21" and
-    ([.runs.steps[] | select(.id == "render") | .env.CHANGELOG_DATE] == ["${{ inputs.date }}"])
+    .inputs.public_source_url.required == false and .inputs.public_source_url.default == "" and
+    ([.runs.steps[] | select(.id == "render") | .env.CHANGELOG_DATE] == ["${{ inputs.date }}"]) and
+    ([.runs.steps[] | select(.id == "render") | .env.PUBLIC_SOURCE_URL] == ["${{ inputs.public_source_url }}"])
 ' "$root/action.json" >/dev/null
 default_date=$(jq --exit-status --raw-output '.inputs.date.default' "$root/action.json")
 for name in validate resolve source render publish; do
@@ -147,28 +149,52 @@ output_value() {
 # release boundaries rather than constructing expectations with production code.
 for component in operator mirrord mirrord-vscode mirrord-intellij; do
     relative=CHANGELOG.md tags=oss,team,enterprise date=$default_date
+    public_source_url="https://github.com/metalbear-co/$component"
     case "$component" in
-        operator) relative=public/CHANGELOG.md; title='Operator Changelog'; tags=team,enterprise; date=2023-08-15 ;;
-        mirrord) title='mirrord Changelog' ;;
-        mirrord-vscode) title='VS Code Changelog' ;;
-        mirrord-intellij) title='IntelliJ Changelog' ;;
+        operator) relative=public/CHANGELOG.md; title='Operator Changelog'; tags=team,enterprise; date=2023-08-15
+            description='The release changelog for the mirrord operator.'; public_source_url= ;;
+        mirrord) title='mirrord Changelog'; description='The release changelog for the mirrord CLI.' ;;
+        mirrord-vscode) title='VS Code Changelog'; description='The release changelog for the mirrord VS Code extension.' ;;
+        mirrord-intellij) title='IntelliJ Changelog'; description='The release changelog for the mirrord IntelliJ plugin.' ;;
     esac
+    if [[ -n "$workspaces" ]]; then
+        workspace=$(jq --exit-status --raw-output --arg repo "github:metalbear-co/$component" \
+            '[.workspaces[] | select(.repo == $repo)] | if length == 1 then .[0].path else error("Missing or duplicate workspace") end' "$workspaces")
+        update="$root/update-$component.json"
+        yq --output-format=json '.' "$workspace/.github/workflows/changelog-update.yaml" > "$update"
+        equal "$(jq --raw-output '.jobs["build-and-publish"].steps[0].with.public_source_url // ""' "$update")" \
+            "$public_source_url" "$component public source URL"
+        title=$(jq --raw-output '.jobs["build-and-publish"].steps[0].with.title' "$update")
+        description=$(jq --raw-output '.jobs["build-and-publish"].steps[0].with.description' "$update")
+        tags=$(jq --raw-output '.jobs["build-and-publish"].steps[0].with.tags' "$update")
+        date=$(jq --exit-status --raw-output --arg default "$default_date" \
+            '.jobs["build-and-publish"].steps[0].with | if has("date") then .date else $default end' "$update")
+        public_source_url=$(jq --raw-output '.jobs["build-and-publish"].steps[0].with.public_source_url // ""' "$update")
+    fi
     source="$sources/$component/$relative"
     before=$(sha256sum -- "$source")
+    receipt="$sources/$component/manifest.json"
+    source_sha=$(jq --exit-status --raw-output '.commit_sha | select(test("^[0-9a-f]{40}$"))' "$receipt")
+    equal "${before%% *}" "$(jq --exit-status --raw-output '.sha256' "$receipt")" "$component receipt checksum"
     cat > "$root/render-$component.bash" <<'EOF'
 set -euo pipefail
-rust-script "$ACTION_DIRECTORY/src/main.rs" < "$SOURCE_FILE"
+rust-script "$ACTION_DIRECTORY/src/main.rs" < "$INPUT_FILE"
 EOF
     execute "$root/render-$component.bash" "$root" "$root/render-$component.json" \
-        "ACTION_DIRECTORY=$action_directory" "SOURCE_FILE=$source" "CHANGELOG_TITLE=$title" \
-        'CHANGELOG_DESCRIPTION=Public release history.' "CHANGELOG_TAGS=$tags" "CHANGELOG_DATE=$date"
+        "ACTION_DIRECTORY=$action_directory" "INPUT_FILE=$source" "SOURCE_FILE=$relative" \
+        "SOURCE_SHA=$source_sha" "PUBLIC_SOURCE_URL=$public_source_url" "CHANGELOG_TITLE=$title" \
+        "CHANGELOG_DESCRIPTION=$description" "CHANGELOG_TAGS=$tags" "CHANGELOG_DATE=$date"
     expect_exit 0
     equal "$(release_headings "$result_log.stdout")" "$(release_headings "$source")" "$component release headings"
     equal "$(sha256sum -- "$source")" "$before" "$component source bytes"
     cp -- "$result_log.stdout" "$root/$component.md"
     yq --front-matter=extract --output-format=json '.' "$root/$component.md" > "$root/$component.metadata.json"
-    jq --exit-status --arg title "$title" --arg tags "$tags" \
-        '.title == $title and .tags == ($tags | split(",")) and .weight == 100' "$root/$component.metadata.json" >/dev/null
+    jq --exit-status --arg title "$title" --arg tags "$tags" --arg description "$description" --arg date "$date" \
+        '.title == $title and .tags == ($tags | split(",")) and .weight == 100 and
+        .description == $description and .date == ($date + "T00:00:00.000Z")' "$root/$component.metadata.json" >/dev/null
+    if [[ -n "$public_source_url" ]]; then
+        contains "$root/$component.md" "[TELEMETRY.md]($public_source_url/blob/$source_sha/TELEMETRY.md)"
+    fi
 done
 printf 'Complete histories and component metadata passed\n'
 
@@ -282,18 +308,20 @@ printf 'Concurrent same-page conflict, retry budget and transport failure passed
 # Execute actual env-only rendering against an immutable source commit.
 fixture source-checkout
 source="$root/source-checkout"
-printf '## 1.0.0\n\nPublic release.\n' > "$source/seed/CHANGELOG.md"
+printf '## 1.0.0\n\nPublic release. [telemetry](./TELEMETRY.md)\n' > "$source/seed/CHANGELOG.md"
 git_at "$source/seed" add -- CHANGELOG.md
 git_at "$source/seed" commit --message release >/dev/null
 source_sha=$(git_at "$source/seed" rev-parse HEAD)
 output="$root/render-output"
 : > "$output"
-render_env=("SOURCE_SHA=$source_sha" "SOURCE_FILE=$source/seed/CHANGELOG.md"
+render_env=("SOURCE_SHA=$source_sha" SOURCE_FILE=CHANGELOG.md
+    PUBLIC_SOURCE_URL=https://github.com/metalbear-co/mirrord
     "ACTION_DIRECTORY=$action_directory" "RUNNER_TEMP=$root" "GITHUB_OUTPUT=$output"
     'CHANGELOG_TITLE=Fixture Changelog' 'CHANGELOG_DESCRIPTION=Public releases.'
     CHANGELOG_TAGS=oss,team "CHANGELOG_DATE=$default_date")
 execute "$root/render.bash" "$source/seed" "$root/render-step.json" "${render_env[@]}"; expect_exit 0
 page=$(output_value "$output" candidate)
+contains "$page" "[telemetry](https://github.com/metalbear-co/mirrord/blob/$source_sha/TELEMETRY.md)"
 yq --front-matter=extract --output-format=json '.' "$page" > "$root/default-date.metadata.json"
 jq --exit-status '.date == "2026-10-21T00:00:00.000Z"' "$root/default-date.metadata.json" >/dev/null
 execute "$root/render.bash" "$source/seed" "$root/override-date.json" "${render_env[@]}" \
@@ -308,6 +336,35 @@ for value in 'bad date' '2026-02-30'; do
     expect_failure
     index=$((index + 1))
 done
+
+# Invalid enabled context must fail before the renderer writes a partial page.
+cat > "$root/context.bash" <<'EOF'
+set -euo pipefail
+rust-script "$ACTION_DIRECTORY/src/main.rs" < "$INPUT_FILE"
+EOF
+context_env=("ACTION_DIRECTORY=$action_directory" "INPUT_FILE=$action_directory/tests/fixtures/links.md"
+    'CHANGELOG_TITLE=Fixture Changelog' 'CHANGELOG_DESCRIPTION=Public releases.'
+    CHANGELOG_TAGS=oss "CHANGELOG_DATE=$default_date")
+execute "$root/context.bash" "$root" "$root/no-context.json" "${context_env[@]}"; expect_exit 0
+contains "$result_log.stdout" '[telemetry](./TELEMETRY.md)'
+execute "$root/context.bash" "$root" "$root/empty-context.json" "${context_env[@]}" PUBLIC_SOURCE_URL=; expect_exit 0
+cmp -- "$root/no-context.json.stdout" "$root/empty-context.json.stdout"
+index=0
+for invalid in \
+    PUBLIC_SOURCE_URL=https://github.com/metalbear-co/operator \
+    PUBLIC_SOURCE_URL=https://github.com/metalbear-co/mirrord/ \
+    SOURCE_SHA=main SOURCE_SHA=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA \
+    SOURCE_FILE=/CHANGELOG.md SOURCE_FILE=docs/../CHANGELOG.md SOURCE_FILE=docs//CHANGELOG.md; do
+    execute "$root/context.bash" "$root" "$root/invalid-context-$index.json" "${context_env[@]}" \
+        PUBLIC_SOURCE_URL=https://github.com/metalbear-co/mirrord "SOURCE_SHA=$sha" SOURCE_FILE=CHANGELOG.md "$invalid"
+    expect_failure
+    [[ ! -s "$result_log.stdout" ]] || fail 'Invalid context wrote page output'
+    index=$((index + 1))
+done
+execute "$root/context.bash" "$root" "$root/missing-context-source.json" "${context_env[@]}" \
+    PUBLIC_SOURCE_URL=https://github.com/metalbear-co/mirrord
+expect_failure
+[[ ! -s "$result_log.stdout" ]] || fail 'Missing context source wrote page output'
 
 # GitHub downloads the action outside the caller checkout. A misleading caller
 # changelog must survive rendering and destination retries without being read.
@@ -383,6 +440,7 @@ execute "$root/render.bash" "$isolated_source" "$root/isolated-render.json" "${r
     "ACTION_DIRECTORY=$downloaded" "SOURCE_FILE=$source_file"; expect_exit 0
 rendered=$(output_value "$output" candidate)
 contains "$rendered" 'Public release.'
+contains "$rendered" "[telemetry](https://github.com/metalbear-co/mirrord/blob/$source_sha/TELEMETRY.md)"
 jq --exit-status --raw-input --slurp 'contains("Caller content") | not' "$rendered" >/dev/null
 fixture isolated-docs
 isolated_docs="$root/isolated-docs"
@@ -422,13 +480,15 @@ else
             '[.workspaces[] | select(.repo == $repo)] | if length == 1 then .[0].path else error("Missing or duplicate workspace") end' "$workspaces")
         update="$root/update-$component.json"
         release="$root/release-$component.json"
-        yq --output-format=json '.' "$workspace/.github/workflows/changelog-update.yaml" > "$update"
+        # Parsed once above so the saved final history uses the same wrapper data.
         yq --output-format=json '.' "$workspace/.github/workflows/release.yaml" > "$release"
         expected_source=CHANGELOG.md expected_page="changelog/$component.md" expected_date=2026-10-21 secret=CHANGELOG_PAT
         expected_needs='["validate_release_request","release","release_gh"]'
         expected_ref='${{ needs.release.outputs.sha }}'
+        expected_public_source_url="https://github.com/metalbear-co/$component"
         case "$component" in
             operator) expected_source=public/CHANGELOG.md; expected_page=changelog/README.md; expected_date=2023-08-15; secret=OPERATOR_CHANGELOG_PAT
+                expected_public_source_url=
                 expected_needs='["validate_release_request","create-release"]'; expected_ref='${{ needs.validate_release_request.outputs.sha }}' ;;
             mirrord) expected_needs='["validate_release_request","release_gh"]'; expected_ref='${{ needs.validate_release_request.outputs.sha }}' ;;
         esac
@@ -437,7 +497,8 @@ else
             .needs == $needs and (.if | contains("needs.validate_release_request.outputs.should_release == '\''true'\''")) and
             .uses == "./.github/workflows/changelog-update.yaml" and .with.ref == $ref and (.secrets | keys) == [$secret]
         ' "$release" >/dev/null
-        jq --exit-status --arg secret "$secret" --arg source "$expected_source" --arg page "$expected_page" --arg date "$expected_date" '
+        jq --exit-status --arg secret "$secret" --arg source "$expected_source" --arg page "$expected_page" --arg date "$expected_date" \
+            --arg public_source_url "$expected_public_source_url" '
             .jobs["build-and-publish"] as $job | $job.steps[0] as $action |
             $job.permissions.contents == "read" and ($job.steps | length) == 1 and
             ($action.uses | test("^metalbear-co/release-changelog-docs@[0-9a-f]{40}$")) and
@@ -447,6 +508,7 @@ else
             (.on.workflow_call.secrets | keys) == [$secret] and .on.workflow_call.secrets[$secret].required == true and
             $action.with.git_access_token == ("${{ secrets." + $secret + " }}") and
             $action.with.destination_repo == "metalbear-co/docs-changelog" and
+            ($action.with.public_source_url // "") == $public_source_url and
             ($action.with.local_file_path | sub("^\\./"; "")) == $source and
             ($action.with.destination_file_path | sub("^\\./"; "")) == $page and
             (if $page == "changelog/README.md" then $action.with.date == $date else ($action.with | has("date") | not) end)
@@ -467,6 +529,7 @@ else
             .outputs.source_sha.value == "${{ steps.source.outputs.sha }}" and $resolve.env.GH_TOKEN == "${{ inputs.source_token }}" and
             $render["working-directory"] == "${{ steps.validate.outputs.source_directory }}" and $render.env.ACTION_DIRECTORY == "${{ github.action_path }}" and
             $render.env.SOURCE_SHA == "${{ steps.source.outputs.sha }}" and $render.env.SOURCE_FILE == "${{ steps.validate.outputs.source_file }}" and
+            $render.env.PUBLIC_SOURCE_URL == "${{ inputs.public_source_url }}" and
             $publish.env.SOURCE_SHA == "${{ steps.source.outputs.sha }}" and $destination.path == "${{ steps.validate.outputs.directory }}" and
             $destination.token == "${{ inputs.git_access_token }}"
         ' "$root/action.json" >/dev/null
@@ -496,7 +559,7 @@ EOF
         checkout="$root/resolver-$component"
         file="$checkout/seed/$expected_source"
         mkdir -p -- "$(dirname -- "$file")" "$checkout/seed/nested" "$checkout/seed/public"
-        printf '## 3.10.0\n\nRelease tree.\n' > "$file"
+        printf '## 3.10.0\n\nRelease tree. [telemetry](./TELEMETRY.md)\n' > "$file"
         printf 'Must not select a nested namesake.' > "$checkout/seed/nested/CHANGELOG.md"
         printf 'Must not select a neighboring file.' > "$checkout/seed/public/unrelated.md"
         git_at "$checkout/seed" add -- "$expected_source" nested/CHANGELOG.md public/unrelated.md
@@ -538,15 +601,22 @@ EOF
         title=$(jq --raw-output '.jobs["build-and-publish"].steps[0].with.title' "$update")
         description=$(jq --raw-output '.jobs["build-and-publish"].steps[0].with.description' "$update")
         tags=$(jq --raw-output '.jobs["build-and-publish"].steps[0].with.tags' "$update")
+        public_source_url=$(jq --raw-output '.jobs["build-and-publish"].steps[0].with.public_source_url // ""' "$update")
         date=$(jq --exit-status --raw-output --arg default "$default_date" \
             '.jobs["build-and-publish"].steps[0].with | if has("date") then .date else $default end' "$update")
         execute "$root/render.bash" "$sparse" "$root/sparse-render-$component.json" \
             "SOURCE_SHA=$expected_sha" "SOURCE_FILE=$source_file" "ACTION_DIRECTORY=$action_directory" \
+            "PUBLIC_SOURCE_URL=$public_source_url" \
             "RUNNER_TEMP=$root" "GITHUB_OUTPUT=$rendered_output" "CHANGELOG_TITLE=$title" \
             "CHANGELOG_DESCRIPTION=$description" "CHANGELOG_TAGS=$tags" "CHANGELOG_DATE=$date"
         expect_exit 0
         page=$(output_value "$rendered_output" candidate)
         contains "$page" 'Release tree.'
+        if [[ -n "$expected_public_source_url" ]]; then
+            contains "$page" "[telemetry]($expected_public_source_url/blob/$expected_sha/TELEMETRY.md)"
+        else
+            contains "$page" '[telemetry](./TELEMETRY.md)'
+        fi
         yq --front-matter=extract --output-format=json '.' "$page" > "$root/sparse-render-$component.metadata.json"
         jq --exit-status --arg date "$expected_date" '.date == ($date + "T00:00:00.000Z")' \
             "$root/sparse-render-$component.metadata.json" >/dev/null

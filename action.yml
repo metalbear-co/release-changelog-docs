@@ -36,6 +36,10 @@ inputs:
     description: Source ref; empty selects the latest published non-prerelease release tag
     required: false
     default: ''
+  public_source_url:
+    description: Optional canonical public repository URL for source-relative links
+    required: false
+    default: ''
   source_token:
     description: Token with contents-read access to the caller repository
     required: true
@@ -157,6 +161,7 @@ runs:
         CHANGELOG_DESCRIPTION: ${{ inputs.description }}
         CHANGELOG_TAGS: ${{ inputs.tags }}
         CHANGELOG_DATE: ${{ inputs.date }}
+        PUBLIC_SOURCE_URL: ${{ inputs.public_source_url }}
         SOURCE_SHA: ${{ steps.source.outputs.sha }}
         SOURCE_FILE: ${{ steps.validate.outputs.source_file }}
         ACTION_DIRECTORY: ${{ github.action_path }}

@@ -15,8 +15,9 @@ releases/refs fail rather than fall back to `main`.
 
 ## Inputs
 
-All inputs except `date` and `ref` are required. Component metadata stays fixed;
-source workflows supply it, while the action provides the default page date.
+All inputs except `date`, `ref` and `public_source_url` are required. Component
+metadata stays fixed; source workflows supply it, while the action provides the
+default page date.
 
 | Input | Contract |
 | --- | --- |
@@ -29,6 +30,7 @@ source workflows supply it, while the action provides the default page date.
 | `tags` | Comma-separated nonblank tags. |
 | `date` | Optional fixed initial page date, exactly `YYYY-MM-DD`; defaults to `2026-10-21`. |
 | `ref` | Optional commit, tag or branch; empty selects the latest published release tag, with no main fallback. |
+| `public_source_url` | Optional canonical public source repository URL; empty (the default) preserves relative links. Allowed roots are `https://github.com/metalbear-co/mirrord`, `https://github.com/metalbear-co/mirrord-vscode` and `https://github.com/metalbear-co/mirrord-intellij`. Operator leaves it unset. |
 | `source_token` | Source contents-read token, supplied as `${{ github.token }}` by wrappers. |
 
 | Component | Destination file | Title | Description | Tags | Date |
@@ -75,6 +77,41 @@ Only numeric `[#123]` references to
 Wrapped references are removed with their leading whitespace. Public issue/PR
 links, other labels and external URLs remain. Full inherited IDE history and
 plain historical version headings are retained.
+
+Public callers can opt into source-relative inline link rebasing with
+`public_source_url`. The renderer reads this as `PUBLIC_SOURCE_URL`, together
+with the existing verified `SOURCE_SHA` and normalized `SOURCE_FILE`. It emits
+`<public_source_url>/blob/<SOURCE_SHA>/<resolved-path>` so moved histories keep
+their source repository and selected snapshot. Destinations resolve lexically
+against the changelog's parent directory: `.` and `..` collapse without going
+above the repository root, and query/fragment suffixes retain their bytes. No
+target lookup is performed. Inherited links can still name files absent at that
+snapshot, including IntelliJ's telemetry file in older releases; rebasing does
+not repair missing historical targets or redirect IDE links to another repo.
+
+Enabled context requires one of the exact public URL roots above (no trailing
+slash), a 40-digit lowercase hexadecimal SHA, and a nonempty normalized relative
+source file path. Path segments accept only ASCII letters, digits, `.`, `_`, `~`
+and `-`; empty, `.` and `..` segments are rejected. Invalid enabled context fails
+before page output. With `PUBLIC_SOURCE_URL` unset or empty, standalone renderer
+calls retain existing behavior without requiring either source variable. A
+private repository URL is never inferred from Git, the environment or metadata.
+
+Rebasing supports ordinary single-line `[label](relative/path)` links, including
+labels with inline backtick code, and optional query/fragment suffixes. Paths use
+the same unreserved ASCII characters plus `/` and relative `.`/`..` segments.
+Code spans (including multiple backticks and spans crossing lines), fenced code,
+four-space/tab-indented code and ambiguous HTML/container lines are preserved.
+Inline code requires an equal-length closing backtick run within the same public
+paragraph or list item; unmatched backticks remain literal and cannot suppress
+links in later blocks or releases. Excluded continuation lines can close a valid
+span while retaining their original bytes.
+Absolute schemes, protocol-relative URLs, root-relative paths, query-only and
+fragment-only links are preserved. Reference links/definitions, images, nested
+labels, HTML, angle-bracket destinations, multiline links, titles, escaped or
+parenthesized destinations and above-root traversal are outside this bounded
+syntax and remain unchanged. These link boundaries do not change existing
+release-heading normalization or private issue removal.
 
 Frontmatter keeps the existing layout, `draft: false`, `images: []`, `weight: 100`,
 `toc: true` and UTC midnight timestamps. Arbitrary single-line title/tag scalars
@@ -158,13 +195,20 @@ credentials/global Git configuration from Bash fixtures, and restricts Git
 transport to local files. No real remote is written.
 
 `--sources` contains `<repo>/CHANGELOG.md` (Operator uses
-`operator/public/CHANGELOG.md`). `--workspaces` accepts the coordinator receipt
+`operator/public/CHANGELOG.md`) and each component's `manifest.json`, whose
+`commit_sha` pins source-relative links and whose `sha256` checks the history
+bytes. The stdin artifact filename stays separate from renderer `SOURCE_FILE`.
+`--workspaces` accepts the coordinator receipt
 `{"workspaces":[{"repo":"github:metalbear-co/mirrord","path":"/absolute/issue/workspace"}, ...]}`
-for all four source repositories. With it, the driver also exercises source
-resolver/SHA-capture blocks and checks release-job dependencies, guards, secrets
+for all four source repositories. With it, saved full-history page candidates
+use the actual wrapper metadata and public URL inputs, and the driver exercises
+source resolver/SHA-capture blocks and checks release-job dependencies, guards, secrets
 and action pins. Without it, workflow integration is explicitly unverified.
 The driver covers full histories, component metadata, the effective default page
 date and explicit legacy override through the action render block, no-op dates,
 source SHA validation, checkout isolation, stale versions, provenance, competing
 component writes, same-page conflicts, exhausted retries and transport failure.
+It also checks the three public URL opt-ins and Operator's empty context,
+exact pinned link output through the actual render block, default standalone
+compatibility and rejection of invalid context before page output.
 Inspect the per-scenario JSON logs in its printed artifact directory on failure.
