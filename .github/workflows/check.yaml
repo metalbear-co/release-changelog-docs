@@ -1,0 +1,25 @@
+name: Check release changelog docs
+on:
+  pull_request:
+    paths:
+      - action.yml
+      - src/**
+      - tests/**
+      - .github/workflows/check.yaml
+  push:
+    paths:
+      - action.yml
+      - src/**
+      - tests/**
+      - .github/workflows/check.yaml
+permissions:
+  contents: read
+jobs:
+  cleaner:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: metalbear-co/setup-rust-toolchain@009cda47e1b529982a00627a40eda87b4215035a
+      - run: cargo install rust-script --locked
+      - run: rust-script --test src/main.rs
+      - run: rustfmt --check src/main.rs
