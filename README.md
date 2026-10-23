@@ -63,6 +63,13 @@ categories through the next peer category, release or end of file. Heading-like
 text inside prose or fenced code does not end an Internal category. Empty releases
 receive `No significant changes.`; existing maintenance messages survive.
 
+Inside Internal, fence markers must have at most three leading ASCII spaces.
+Four spaces or a tab mark indented code, so those markers must not hide the next
+public category or release. Real fences stay private until a matching marker of
+at least the opening length has only spaces or tabs after it; headings inside an
+unclosed fence stay private through end of file. Historical public fences retain
+their permissive handling, including issue links after closing markers.
+
 Only numeric `[#123]` references to
 `https://github.com/metalbear-co/operator/issues/123` are private issue references.
 Wrapped references are removed with their leading whitespace. Public issue/PR

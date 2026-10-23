@@ -91,6 +91,8 @@ fn clean_changelog(input: &str) -> Result<String, Box<dyn Error>> {
 
     for line in input.split_inclusive('\n') {
         let trimmed = line.trim_start();
+        let indentation = line.len() - trimmed.len();
+        let fence_indentation = indentation <= 3 && line[..indentation].chars().all(|c| c == ' ');
         let fence_marker = trimmed.chars().next().filter(|c| *c == '`' || *c == '~');
         let fence_length = fence_marker.map_or(0, |marker| {
             trimmed.chars().take_while(|c| *c == marker).count()
@@ -102,21 +104,20 @@ fn clean_changelog(input: &str) -> Result<String, Box<dyn Error>> {
                 .strip_suffix("\r\n")
                 .or_else(|| trimmed.strip_suffix('\n'))
                 .unwrap_or(trimmed);
-            let indentation = line.len() - trimmed.len();
+
             // Released public examples append issue links to their closing markers.
             // Keep that compatibility while requiring real closures inside Internal.
             if fence_marker == Some(character)
                 && fence_length >= length
                 && (internal.not()
-                    || (indentation <= 3
-                        && line[..indentation].chars().all(|c| c == ' ')
+                    || (fence_indentation
                         && closing_line[fence_length..]
                             .chars()
                             .all(|c| matches!(c, ' ' | '\t'))))
             {
                 fence = None;
             }
-        } else if fence_length >= 3 {
+        } else if fence_length >= 3 && (internal.not() || fence_indentation) {
             fence = fence_marker.map(|character| (character, fence_length));
         }
 

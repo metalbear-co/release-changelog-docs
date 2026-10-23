@@ -76,6 +76,53 @@ Maintenance build.
 
 - Private detail after a public historical example.
 
+   ```text
+### Fixed
+PRIVATE_THREE_SPACE_FENCE_SENTINEL
+   ```
+
+    ```text
+    PRIVATE_FOUR_SPACE_PEER_CODE_SENTINEL
+    ```
+
+### Added
+
+- PUBLIC_FOUR_SPACE_PEER_SENTINEL
+
+### Internal
+
+    ```text
+    PRIVATE_FOUR_SPACE_RELEASE_CODE_SENTINEL
+    ```
+
+## 3.8.2 - 2026-10-19
+
+- PUBLIC_FOUR_SPACE_RELEASE_SENTINEL
+
+### Internal
+
+	```text
+	PRIVATE_TAB_PEER_CODE_SENTINEL
+	```
+
+ 	```text
+ 	PRIVATE_SPACE_TAB_CODE_SENTINEL
+ 	```
+
+### Added
+
+- PUBLIC_TAB_PEER_SENTINEL
+
+### Internal
+
+	```text
+	PRIVATE_TAB_RELEASE_CODE_SENTINEL
+	```
+
+## 3.8.1 - 2026-10-19
+
+- PUBLIC_TAB_RELEASE_SENTINEL
+
 ## [3.8.0](https://example.com/releases/3.8.0) - 2026-10-19
 
 
