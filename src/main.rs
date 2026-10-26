@@ -373,7 +373,7 @@ fn clean_changelog(input: &str, source: Option<&SourceContext>) -> Result<String
             {
                 fence = None;
             }
-        } else if fence_length >= 3 && (internal.not() || fence_indentation) {
+        } else if fence_length >= 3 && fence_indentation {
             fence = fence_marker.map(|character| (character, fence_length));
         }
 
@@ -535,6 +535,38 @@ mod tests {
             clean_changelog(input, Some(&source)).unwrap(),
             format!("{expected}\n\n")
         );
+    }
+
+    #[test]
+    fn indented_public_markers_do_not_hide_internal_sections() {
+        let source = SourceContext::new(
+            "https://github.com/metalbear-co/mirrord",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "CHANGELOG.md",
+        )
+        .unwrap();
+
+        for indentation in ["    ", "\t", " \t"] {
+            for marker in ["```", "~~~"] {
+                let input = format!(
+                    "## 1.2.3\n\n### Fixed\nPublic change.\n\n{indentation}{marker}\n\n\
+                     ### Internal\nPRIVATE_SENTINEL\n\n### Added\nPublic continuation.\n"
+                );
+                let expected = format!(
+                    "## 1.2.3\n\n### Fixed\nPublic change.\n\n{indentation}{marker}\n\n\
+                     ### Added\nPublic continuation.\n"
+                );
+
+                for source in [None, Some(&source)] {
+                    assert_eq!(
+                        clean_changelog(&input, source).unwrap(),
+                        expected,
+                        "indentation={indentation:?}, marker={marker:?}, source={}",
+                        source.is_some(),
+                    );
+                }
+            }
+        }
     }
 
     #[test]
